@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagrama de Hasse</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://pyscript.net/releases/2024.11.1/core.css">
+  <script type="module" src="https://pyscript.net/releases/2024.11.1/core.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Diagrama de Hasse</h1>
+      <p>Introdueix les relacions d'un ordre i obtindràs el diagrama amb els nivells, els elements minimals i els maximals.</p>
+    </header>
+
+    <div class="layout">
+      <section class="panel" aria-labelledby="h-input">
+        <h2 id="h-input">Relacions</h2>
+        <label for="rels">Parelles d'elements</label>
+        <textarea id="rels" rows="5" spellcheck="false">A-B A-C A-D A-E A-F A-G B-C B-D B-F C-F D-F E-F E-G</textarea>
+        <p class="hint">
+          <code>A-B</code> vol dir A ≤ B (A està relacionat amb B). Separa-les amb espais, comes o salts de línia.
+          Un nom sol, com <code>Z</code>, afegeix un element aïllat.
+        </p>
+        <button id="go" disabled>Carregant Python…</button>
+
+        <ol class="levels" id="levels" aria-live="polite"></ol>
+        <div class="error" id="error" role="alert"></div>
+      </section>
+
+      <section class="panel stage" aria-labelledby="h-diagram">
+        <h2 id="h-diagram">Diagrama</h2>
+        <p class="stage-empty" id="empty">El diagrama apareixerà aquí.</p>
+        <div class="diagram" id="diagram"></div>
+        <p class="hint" id="drag-hint" hidden>Arrossega els nodes per moure'ls. El botó «Dibuixa el diagrama» restableix les posicions.</p>
+        <div class="legend" id="legend" hidden>
+          <span><i class="dot max"></i>Maximal</span>
+          <span><i class="dot min"></i>Minimal</span>
+          <span id="leg-both" hidden><i class="dot both"></i>Minimal i maximal (aïllat)</span>
+          <span><i class="dot mid"></i>Altres</span>
+          <a class="download" id="dl" download="diagrama-hasse.svg" href="#" hidden>Descarrega l'SVG</a>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script type="py">
+    import math
+    import html as H
+    from pyscript import document, when
+
+    UX, UY = 110, 100   # separació horitzontal i vertical entre nodes
+    INK = "#14213d"
+    EDGE = "#44506b"
+    MIN_C, MIN_BG = "#0f8b8d", "#d9f1f1"
+    MAX_C, MAX_BG = "#e4572e", "#fde3da"
+    BOTH_C, BOTH_BG = "#6a4c93", "#e9e0f4"
+
+    def parse(text):
+        elems, rels = set(), []
+        for t in text.replace(",", " ").split():
+            if "-" in t:
+                a, b = t.split("-", 1)
+                if not a or not b or "-" in b:
+                    raise ValueError(f"Relació no vàlida: «{t}». Usa el format A-B.")
+                elems |= {a, b}
+                if a != b:
+                    rels.append((a, b))
+            else:
+                elems.add(t)
+        return elems, rels
+
+    def analyse(elems, rels):
+        # up[x] = tot el que hi ha per sobre de x (clausura transitiva, Warshall)
+        up = {e: set() for e in elems}
+        for a, b in rels:
+            up[a].add(b)
+        for k in elems:
+            for i in elems:
+                if k in up[i]:
+                    up[i] |= up[k]
+        if any(e in up[e] for e in elems):
+            raise ValueError("Les relacions contenen un cicle, per tant no formen un ordre parcial.")
+
+        # relacions de recobriment = clausura sense les arestes implicades per un element intermedi
+        covers = [(a, b) for a in elems for b in up[a]
+                  if not any(b in up[c] for c in up[a])]
+
+        # nivell = cadena més llarga per sota de l'element (0 = minimals)
+        below = {e: {a for a in elems if e in up[a]} for e in elems}
+        level = {}
+        def lvl(x):
+            if x not in level:
+                level[x] = 0 if not below[x] else 1 + max(lvl(p) for p in below[x])
+            return level[x]
+        for e in elems:
+            lvl(e)
+
+        minimals = {e for e in elems if not below[e]}
+        maximals = {e for e in elems if not up[e]}
+        return covers, level, minimals, maximals
+
+    def layout(elems, covers, level):
+        layers = {}
+        for e in sorted(elems):
+            layers.setdefault(level[e], []).append(e)
+        top = max(layers)
+        lower = {e: [a for a, b in covers if b == e] for e in elems}
+        upper = {e: [b for a, b in covers if a == e] for e in elems}
+
+        def xs(layer):
+            n = len(layer)
+            return {e: i - (n - 1) / 2 for i, e in enumerate(layer)}
+
+        pos = {}
+        for l in layers:
+            pos.update(xs(layers[l]))
+
+        # unes quantes passades de baricentre per reduir els creuaments
+        for _ in range(4):
+            for l in range(1, top + 1):
+                layers[l].sort(key=lambda e: sum(pos[n] for n in lower[e]) / len(lower[e]) if lower[e] else pos[e])
+                pos.update(xs(layers[l]))
+            for l in range(top - 1, -1, -1):
+                layers[l].sort(key=lambda e: sum(pos[n] for n in upper[e]) / len(upper[e]) if upper[e] else pos[e])
+                pos.update(xs(layers[l]))
+        return layers, {e: (pos[e], level[e]) for e in elems}
+
+    def radius(label):
+        return max(22, 6 * len(label) + 14)
+
+    def build_svg(covers, coords, layers, minimals, maximals):
+        width = max(len(l) for l in layers.values())
+        top = max(layers)
+        r = {e: radius(e) for e in coords}
+        pad = max(r.values()) + 24
+        W = max((width - 1) * UX + 2 * pad, 280)
+        H_ = top * UY + 2 * pad
+        pos = {e: (W / 2 + x * UX, pad + (top - y) * UY) for e, (x, y) in coords.items()}
+
+        # fletxes: A < B  =>  A --> B (de vora a vora dels cercles)
+        edges = []
+        for a, b in sorted(covers):
+            (x1, y1), (x2, y2) = pos[a], pos[b]
+            d = math.hypot(x2 - x1, y2 - y1) or 1
+            ux, uy = (x2 - x1) / d, (y2 - y1) / d
+            edges.append(
+                f'<line class="edge" data-a="{H.escape(a)}" data-b="{H.escape(b)}" '
+                f'x1="{x1 + ux * r[a]:.1f}" y1="{y1 + uy * r[a]:.1f}" '
+                f'x2="{x2 - ux * r[b]:.1f}" y2="{y2 - uy * r[b]:.1f}" '
+                f'stroke="{EDGE}" stroke-width="2" marker-end="url(#arr)"/>'
+            )
+
+        nodes = []
+        for e in sorted(pos):
+            x, y = pos[e]
+            is_min, is_max = e in minimals, e in maximals
+            if is_min and is_max:
+                fc, ec = BOTH_BG, BOTH_C
+            elif is_max:
+                fc, ec = MAX_BG, MAX_C
+            elif is_min:
+                fc, ec = MIN_BG, MIN_C
+            else:
+                fc, ec = "#ffffff", INK
+            weight = 700 if (is_min or is_max) else 500
+            name = H.escape(e)
+            nodes.append(
+                f'<g class="node" data-id="{name}" data-x="{x:.1f}" data-y="{y:.1f}" data-r="{r[e]}" '
+                f'transform="translate({x:.1f},{y:.1f})">'
+                f'<circle r="{r[e]}" fill="{fc}" stroke="{ec}" stroke-width="2.5"/>'
+                f'<text text-anchor="middle" dominant-baseline="central" '
+                f'font-family="IBM Plex Sans, system-ui, sans-serif" font-size="18" '
+                f'font-weight="{weight}" fill="{INK}">{name}</text></g>'
+            )
+
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W:.0f} {H_:.0f}" width="{W:.0f}" '
+            f'role="img" aria-label="Diagrama de Hasse">'
+            f'<defs><marker id="arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto">'
+            f'<path d="M0,0 L10,5 L0,10 z" fill="{EDGE}"/></marker></defs>'
+            f'<rect width="100%" height="100%" fill="#ffffff"/>'
+            + "".join(edges) + "".join(nodes) + "</svg>"
+        )
+
+    def show_error(msg):
+        document.querySelector("#error").innerText = msg
+        document.querySelector("#levels").innerHTML = ""
+        document.querySelector("#diagram").innerHTML = ""
+        document.querySelector("#legend").hidden = True
+        document.querySelector("#drag-hint").hidden = True
+        document.querySelector("#empty").hidden = False
+
+    @when("click", "#go")
+    def on_click(event=None):
+        try:
+            elems, rels = parse(document.querySelector("#rels").value)
+            if not elems:
+                raise ValueError("Introdueix com a mínim una relació o un element.")
+            covers, level, minimals, maximals = analyse(elems, rels)
+            layers, coords = layout(elems, covers, level)
+            svg = build_svg(covers, coords, layers, minimals, maximals)
+        except Exception as e:
+            show_error(str(e))
+            return
+
+        document.querySelector("#error").innerText = ""
+        document.querySelector("#diagram").innerHTML = svg
+        document.querySelector("#empty").hidden = True
+        document.querySelector("#drag-hint").hidden = False
+        document.querySelector("#legend").hidden = False
+        document.querySelector("#leg-both").hidden = not (minimals & maximals)
+        document.querySelector("#dl").hidden = False
+
+        items = ""
+        for l in sorted(layers, reverse=True):
+            names = ", ".join(sorted(layers[l]))
+            items += f'<li><span class="n">nivell {l}</span><span>{{{H.escape(names)}}}</span></li>'
+        document.querySelector("#levels").innerHTML = items
+
+    btn = document.querySelector("#go")
+    btn.disabled = False
+    btn.innerText = "Dibuixa el diagrama"
+    on_click()
+  </script>
+
+  <script src="drag.js"></script>
+</body>
+</html>
